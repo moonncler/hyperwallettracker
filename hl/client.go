@@ -96,17 +96,28 @@ func (c *Client) connect() error {
 		conn.Close()
 	}()
 
-	conn.SetPongHandler(func(string) error {
-		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		return nil
-	})
+	// Hyperliquid requires JSON ping {"method":"ping"}, not WS ping frames
+	go func() {
+		tick := time.NewTicker(15 * time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-c.ctx.Done():
+				return
+			case <-tick.C:
+				c.mu.Lock()
+				ok := c.conn == conn
+				c.mu.Unlock()
+				if !ok {
+					return
+				}
+				if err := conn.WriteJSON(map[string]string{"method": "ping"}); err != nil {
+					return
+				}
+			}
+		}
+	}()
 
-	// Subscribe:
-	// - userEvents  → fills, funding, liquidation, nonUserCancel
-	// - orderUpdates → order lifecycle
-	// - userTwapHistory → twap start/stop
-	// NOTE: userFills is intentionally NOT subscribed — userEvents already
-	// contains fills. Subscribing both causes duplicate notifications.
 	subs := []map[string]interface{}{
 		{"type": "userEvents", "user": c.Address},
 		{"type": "orderUpdates", "user": c.Address},
@@ -121,27 +132,11 @@ func (c *Client) connect() error {
 		}
 	}
 
-	// keepalive ping
-	go func() {
-		tick := time.NewTicker(20 * time.Second)
-		defer tick.Stop()
-		for {
-			select {
-			case <-c.ctx.Done():
-				return
-			case <-tick.C:
-				c.mu.Lock()
-				ok := c.conn == conn
-				c.mu.Unlock()
-				if ok {
-					_ = conn.WriteMessage(websocket.PingMessage, nil)
-				}
-			}
-		}
-	}()
+	// dedup: track last seen order OID+status to drop duplicates
+	seenOrders := make(map[string]struct{}, 64)
 
-	// raw message channel — decouple read from parse
-	rawCh := make(chan []byte, 128)
+	// decouple read from parse
+	rawCh := make(chan []byte, 256)
 	go func() {
 		defer close(rawCh)
 		for {
@@ -153,12 +148,10 @@ func (c *Client) connect() error {
 			select {
 			case rawCh <- raw:
 			default:
-				// parser falling behind — drop rather than block reader
 			}
 		}
 	}()
 
-	// parse loop runs in this goroutine
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -170,12 +163,12 @@ func (c *Client) connect() error {
 				}
 				return fmt.Errorf("connection closed")
 			}
-			c.handleRaw(raw)
+			c.handleRaw(raw, seenOrders)
 		}
 	}
 }
 
-func (c *Client) handleRaw(raw []byte) {
+func (c *Client) handleRaw(raw []byte, seenOrders map[string]struct{}) {
 	var env struct {
 		Channel string          `json:"channel"`
 		Data    json.RawMessage `json:"data"`
@@ -209,6 +202,16 @@ func (c *Client) handleRaw(raw []byte) {
 			return
 		}
 		for i := range updates {
+			// deduplicate by oid+status
+			key := fmt.Sprintf("%d:%s", updates[i].Order.Oid, updates[i].Status)
+			if _, seen := seenOrders[key]; seen {
+				continue
+			}
+			seenOrders[key] = struct{}{}
+			// keep map small
+			if len(seenOrders) > 512 {
+				seenOrders = make(map[string]struct{}, 64)
+			}
 			c.emit(Event{Address: c.Address, Kind: KindOrderUpdate, Order: &updates[i]})
 		}
 
