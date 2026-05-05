@@ -18,6 +18,7 @@ type Broadcast func(v interface{})
 type Manager struct {
 	db        *db.DB
 	broadcast Broadcast
+	rootCtx   context.Context
 	mu        sync.RWMutex
 	clients   map[string]*walletEntry
 	chatCache map[string][]int64
@@ -40,13 +41,14 @@ func NewManager(database *db.DB, broadcast Broadcast) *Manager {
 func (m *Manager) SetBroadcast(b Broadcast) { m.broadcast = b }
 
 func (m *Manager) Start(ctx context.Context) error {
+	m.rootCtx = ctx
 	wallets, err := m.db.ListWallets(ctx)
 	if err != nil {
 		return err
 	}
 	for _, w := range wallets {
 		m.addToCache(w.Address, w.ChatID)
-		m.startClient(ctx, w.Address)
+		m.startClient(w.Address)
 	}
 	return nil
 }
@@ -61,7 +63,7 @@ func (m *Manager) AddWallet(ctx context.Context, address, label string, chatID i
 	_, exists := m.clients[address]
 	m.mu.RUnlock()
 	if !exists {
-		m.startClient(ctx, address)
+		m.startClient(address)
 	}
 	return nil
 }
@@ -118,8 +120,8 @@ func (m *Manager) ListTracked() []string {
 	return out
 }
 
-func (m *Manager) startClient(parentCtx context.Context, address string) {
-	ctx, cancel := context.WithCancel(parentCtx)
+func (m *Manager) startClient(address string) {
+	ctx, cancel := context.WithCancel(m.rootCtx)
 	client := hl.NewClient(ctx, address)
 	m.mu.Lock()
 	m.clients[address] = &walletEntry{client: client, cancel: cancel}
