@@ -78,11 +78,14 @@ func (b *Bot) startSenders(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case job := <-b.sendQ:
+					t0 := time.Now()
 					msg := tgbotapi.NewMessage(job.chatID, job.text)
 					msg.ParseMode = tgbotapi.ModeHTML
 					msg.DisableWebPagePreview = true
 					if _, err := b.api.Send(msg); err != nil {
 						log.Printf("[bot] send to %d: %v", job.chatID, err)
+					} else {
+						log.Printf("[tg] sendMessage took %dms", time.Since(t0).Milliseconds())
 					}
 				}
 			}
