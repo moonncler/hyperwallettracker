@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -16,21 +17,19 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
-// Hub broadcasts events to all connected browser clients.
 type Hub struct {
 	mu      sync.RWMutex
-	clients map[*client]struct{}
+	clients map[*wsClient]struct{}
 }
 
-type client struct {
+type wsClient struct {
 	send chan []byte
 }
 
 func NewHub() *Hub {
-	return &Hub{clients: make(map[*client]struct{})}
+	return &Hub{clients: make(map[*wsClient]struct{})}
 }
 
-// Broadcast sends a JSON payload to every connected browser tab.
 func (h *Hub) Broadcast(v interface{}) {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -42,40 +41,34 @@ func (h *Hub) Broadcast(v interface{}) {
 		select {
 		case c.send <- b:
 		default:
-			// slow client — drop
 		}
 	}
 }
 
-func (h *Hub) add(c *client) {
+func (h *Hub) add(c *wsClient) {
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
 }
 
-func (h *Hub) remove(c *client) {
+func (h *Hub) remove(c *wsClient) {
 	h.mu.Lock()
 	delete(h.clients, c)
 	h.mu.Unlock()
 }
 
-// ServeWS upgrades HTTP to WebSocket and pumps events to the browser.
-func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
+func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
-	c := &client{send: make(chan []byte, 256)}
+	c := &wsClient{send: make(chan []byte, 256)}
 	h.add(c)
-	defer func() {
-		h.remove(c)
-		conn.Close()
-	}()
+	defer func() { h.remove(c); conn.Close() }()
 
-	// write pump
 	go func() {
-		ticker := time.NewTicker(25 * time.Second)
-		defer ticker.Stop()
+		tick := time.NewTicker(25 * time.Second)
+		defer tick.Stop()
 		for {
 			select {
 			case msg, ok := <-c.send:
@@ -87,7 +80,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 				if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 					return
 				}
-			case <-ticker.C:
+			case <-tick.C:
 				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 					return
@@ -96,7 +89,6 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// read pump (discard browser messages, detect disconnect)
 	conn.SetReadLimit(512)
 	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	conn.SetPongHandler(func(string) error {
@@ -110,21 +102,81 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Server runs the HTTP server serving the UI and WS endpoint.
-type Server struct {
-	hub  *Hub
-	addr string
+type WalletManager interface {
+	AddWallet(ctx context.Context, address, label string, chatID int64) error
+	RemoveWallet(ctx context.Context, address string, chatID int64) error
+	ListTracked() []string
 }
 
-func NewServer(hub *Hub, addr string) *Server {
-	return &Server{hub: hub, addr: addr}
+type Server struct {
+	hub     *Hub
+	addr    string
+	wallets WalletManager
+}
+
+func NewServer(hub *Hub, addr string, wallets WalletManager) *Server {
+	return &Server{hub: hub, addr: addr, wallets: wallets}
 }
 
 func (s *Server) Run() error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", s.hub.ServeWS)
+	mux.HandleFunc("/ws", s.hub.serveWS)
+	mux.HandleFunc("/api/wallets", s.handleWallets)
 	mux.Handle("/", http.FileServer(http.Dir("web/static")))
 
+	srv := &http.Server{
+		Addr:         s.addr,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
 	log.Printf("[web] listening on %s", s.addr)
-	return http.ListenAndServe(s.addr, mux)
+	return srv.ListenAndServe()
+}
+
+func (s *Server) handleWallets(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	switch r.Method {
+	case http.MethodGet:
+		list := s.wallets.ListTracked()
+		if list == nil {
+			list = []string{}
+		}
+		_ = json.NewEncoder(w).Encode(list)
+
+	case http.MethodPost:
+		var req struct {
+			Address string `json:"address"`
+			Label   string `json:"label"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		if err := s.wallets.AddWallet(r.Context(), req.Address, req.Label, 0); err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+
+	case http.MethodDelete:
+		var req struct {
+			Address string `json:"address"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		if err := s.wallets.RemoveWallet(r.Context(), req.Address, 0); err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }

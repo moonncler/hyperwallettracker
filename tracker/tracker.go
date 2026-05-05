@@ -13,12 +13,10 @@ import (
 	"hyperwallettracker/hl"
 )
 
-type Notify func(chatID int64, text string)
 type Broadcast func(v interface{})
 
 type Manager struct {
 	db        *db.DB
-	notify    Notify
 	broadcast Broadcast
 	mu        sync.RWMutex
 	clients   map[string]*walletEntry
@@ -30,10 +28,9 @@ type walletEntry struct {
 	cancel context.CancelFunc
 }
 
-func NewManager(database *db.DB, notify Notify, broadcast Broadcast) *Manager {
+func NewManager(database *db.DB, broadcast Broadcast) *Manager {
 	return &Manager{
 		db:        database,
-		notify:    notify,
 		broadcast: broadcast,
 		clients:   make(map[string]*walletEntry),
 		chatCache: make(map[string][]int64),
@@ -60,7 +57,6 @@ func (m *Manager) AddWallet(ctx context.Context, address, label string, chatID i
 		return err
 	}
 	m.addToCache(address, chatID)
-
 	m.mu.RLock()
 	_, exists := m.clients[address]
 	m.mu.RUnlock()
@@ -76,7 +72,6 @@ func (m *Manager) RemoveWallet(ctx context.Context, address string, chatID int64
 		return err
 	}
 	m.removeFromCache(address, chatID)
-
 	m.mu.RLock()
 	remaining := m.getCached(address)
 	m.mu.RUnlock()
@@ -113,21 +108,28 @@ func (m *Manager) getCached(address string) []int64 {
 	return m.chatCache[address]
 }
 
+func (m *Manager) ListTracked() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]string, 0, len(m.clients))
+	for addr := range m.clients {
+		out = append(out, addr)
+	}
+	return out
+}
+
 func (m *Manager) startClient(parentCtx context.Context, address string) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	client := hl.NewClient(ctx, address)
-
 	m.mu.Lock()
 	m.clients[address] = &walletEntry{client: client, cancel: cancel}
 	m.mu.Unlock()
-
 	go func() {
 		log.Printf("[tracker] start %s", address)
 		client.Run()
 		log.Printf("[tracker] stopped %s", address)
 	}()
-
-	go m.consume(ctx, address, client)
+	go m.consume(ctx, client)
 }
 
 func (m *Manager) stopClient(address string) {
@@ -143,7 +145,7 @@ func (m *Manager) stopClient(address string) {
 	}
 }
 
-func (m *Manager) consume(ctx context.Context, address string, client *hl.Client) {
+func (m *Manager) consume(ctx context.Context, client *hl.Client) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -152,190 +154,26 @@ func (m *Manager) consume(ctx context.Context, address string, client *hl.Client
 			if !ok {
 				return
 			}
-			m.dispatch(ctx, evt)
+			m.dispatch(evt)
 		}
 	}
 }
 
-func (m *Manager) dispatch(ctx context.Context, evt hl.Event) {
-	text := formatEvent(evt)
-	if text == "" {
-		return
-	}
-
-	m.mu.RLock()
-	ids := make([]int64, len(m.chatCache[evt.Address]))
-	copy(ids, m.chatCache[evt.Address])
-	m.mu.RUnlock()
-
-	if len(ids) == 0 {
-		return
-	}
-
-	recvAt := time.Now()
+func (m *Manager) dispatch(evt hl.Event) {
 	eventTime := evt.EventTime()
 	if eventTime > 0 {
-		log.Printf("[lag] %s %s: HL→server %dms", evt.Kind, evt.Address[:8], recvAt.UnixMilli()-eventTime)
+		log.Printf("[lag] %s %s: HL→server %dms", evt.Kind, evt.Address[:8], time.Now().UnixMilli()-eventTime)
 	}
-
-	// push to web hub instantly (zero extra latency)
 	if m.broadcast != nil {
 		m.broadcast(webPayload(evt))
 	}
-
-	// push to Telegram
-	for _, chatID := range ids {
-		chatID := chatID
-		go m.notify(chatID, text)
-	}
-
 	go func() {
+		ctx := context.Background()
 		payload, _ := json.Marshal(evt)
 		_ = m.db.SaveEvent(ctx, evt.Address, string(evt.Kind), string(payload))
 	}()
 }
 
-func formatEvent(evt hl.Event) string {
-	switch evt.Kind {
-
-	case hl.KindFill:
-		f := evt.Fill
-		side := "🟢 BUY"
-		if f.Side == "A" {
-			side = "🔴 SELL"
-		}
-		twap := ""
-		if f.TwapID != nil {
-			twap = " [TWAP]"
-		}
-		dir := ""
-		if f.Dir != "" {
-			dir = " · " + f.Dir
-		}
-		pnl := ""
-		if f.ClosedPnl != "" && f.ClosedPnl != "0" {
-			pnl = "\n💰 PnL: " + f.ClosedPnl + " USDC"
-		}
-		return "📊 <b>FILL" + twap + "</b>" + dir + "\n" +
-			"👛 <code>" + short(evt.Address) + "</code>\n" +
-			"📌 " + f.Coin + " · " + side + "\n" +
-			"💲 Price: " + f.Px + " · Size: " + f.Sz +
-			pnl + "\n" +
-			"💸 Fee: " + f.Fee + " " + f.FeeToken
-
-	case hl.KindFunding:
-		fn := evt.Funding
-		sign := "📈"
-		if len(fn.Usdc) > 0 && fn.Usdc[0] == '-' {
-			sign = "📉"
-		}
-		return sign + " <b>FUNDING</b>\n" +
-			"👛 <code>" + short(evt.Address) + "</code>\n" +
-			"📌 " + fn.Coin + "\n" +
-			"💵 " + fn.Usdc + " USDC · Rate: " + fn.FundingRate
-
-	case hl.KindLiquidation:
-		liq := evt.Liq
-		return "🚨 <b>LIQUIDATION</b>\n" +
-			"👛 <code>" + short(evt.Address) + "</code>\n" +
-			"💸 Notional: " + liq.LiquidatedNtl + "\n" +
-			"💰 Fee: " + liq.LiquidatedFee
-
-	case hl.KindNonUserCancel:
-		c := evt.Cancel
-		return "⚠️ <b>ORDER CANCELLED (system)</b>\n" +
-			"👛 <code>" + short(evt.Address) + "</code>\n" +
-			"📌 " + c.Coin + " · OID: " + itoa(c.Oid)
-
-	case hl.KindOrderUpdate:
-		o := evt.Order
-		statusEmoji := orderEmoji(o.Status)
-		twap := ""
-		if o.Order.TwapID != nil {
-			twap = " [TWAP]"
-		}
-		return statusEmoji + " <b>ORDER " + strings.ToUpper(o.Status) + twap + "</b>\n" +
-			"👛 <code>" + short(evt.Address) + "</code>\n" +
-			"📌 " + o.Order.Coin + " · " + sideStr(o.Order.Side) + "\n" +
-			"📋 Type: " + o.Order.OrderType + "\n" +
-			"💲 " + o.Order.LimitPx + " · Sz: " + o.Order.Sz
-
-	case hl.KindTwapUpdate:
-		t := evt.Twap
-		emoji, action := twapStatusEmoji(t.Status)
-		side := "🟢 BUY"
-		if t.Twap.Side == "A" {
-			side = "🔴 SELL"
-		}
-		reduceOnly := ""
-		if t.Twap.ReduceOnly {
-			reduceOnly = " · Reduce Only"
-		}
-		return fmt.Sprintf(
-			"%s <b>TWAP %s</b>\n"+
-				"👛 <code>%s</code>\n"+
-				"📌 %s · %s%s\n"+
-				"📦 Size: %s · Duration: %dm\n"+
-				"🆔 ID: %d",
-			emoji, action,
-			short(evt.Address),
-			t.Twap.Coin, side, reduceOnly,
-			t.Twap.Sz, t.Twap.Minutes,
-			t.Twap.TwapID,
-		)
-	}
-	return ""
-}
-
-func twapStatusEmoji(status string) (string, string) {
-	switch status {
-	case "activated":
-		return "🚀", "STARTED"
-	case "terminated":
-		return "🛑", "CANCELLED"
-	case "finished":
-		return "✅", "FINISHED"
-	default:
-		return "🔄", strings.ToUpper(status)
-	}
-}
-
-func orderEmoji(status string) string {
-	switch status {
-	case "open":
-		return "🔷"
-	case "filled":
-		return "✅"
-	case "canceled", "marginCanceled":
-		return "❌"
-	case "triggered":
-		return "⚡"
-	case "rejected":
-		return "🚫"
-	default:
-		return "🔹"
-	}
-}
-
-func sideStr(s string) string {
-	if s == "B" {
-		return "BUY"
-	}
-	return "SELL"
-}
-
-func short(addr string) string {
-	if len(addr) <= 10 {
-		return addr
-	}
-	return addr[:6] + "…" + addr[len(addr)-4:]
-}
-
-func itoa(n int64) string {
-	return fmt.Sprintf("%d", n)
-}
-
-// webPayload converts an hl.Event to a JSON-friendly map for the browser.
 func webPayload(evt hl.Event) map[string]interface{} {
 	p := map[string]interface{}{
 		"kind":    evt.Kind,
@@ -357,3 +195,5 @@ func webPayload(evt hl.Event) map[string]interface{} {
 	}
 	return p
 }
+
+func itoa(n int64) string { return fmt.Sprintf("%d", n) }
