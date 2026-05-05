@@ -165,24 +165,24 @@ function addEvent(ev){
   let icon,klass,label,detail,freq=0;
 
   if(k==='fill'){
-    const f=ev.fill,buy=f.side==='B',twap=f.twap_id!=null;
+    const f=ev.fill,buy=f.side==='B',twap=f.twapId!=null;
     icon=buy?'🟢':'🔴';klass=buy?'g':'r';label='FILL';freq=buy?660:440;
-    const pnl=f.closed_pnl&&parseFloat(f.closed_pnl)!==0?` <span class="${parseFloat(f.closed_pnl)>0?'g':'r'}">PnL ${fmtPnl(f.closed_pnl)}</span>`:'';
+    const pnl=f.closedPnl&&parseFloat(f.closedPnl)!==0?` <span class="${parseFloat(f.closedPnl)>0?'g':'r'}">PnL ${fmtPnl(f.closedPnl)}</span>`:'';
     detail=`<span class="v">${f.coin}</span> <span class="tag ${buy?'buy':'sell'}">${buy?'BUY':'SELL'}</span>`
       +(twap?' <span class="tag twap">TWAP</span>':'')
       +(f.dir?` <span>${f.dir}</span>`:'')
-      +`<br>Price <span class="v">${fmt(f.px)}</span> · Size <span class="v">${fmt(f.sz)}</span>${pnl} · Fee <span class="v">${f.fee} ${f.fee_token}</span>`;
+      +`<br>Price <span class="v">${fmt(f.px)}</span> · Size <span class="v">${fmt(f.sz)}</span>${pnl} · Fee <span class="v">${f.fee} ${f.feeToken}</span>`;
 
   }else if(k==='order_update'){
-    const o=ev.order,st=o.status,ord=o.order||{},twap=ord.twap_id!=null;
+    const o=ev.order,st=o.status,ord=o.order||{},twap=ord.twapId!=null;
     const ic={open:'🔷',filled:'✅',canceled:'❌',marginCanceled:'❌',triggered:'⚡',rejected:'🚫'};
     const cl={open:'b',filled:'g',canceled:'',marginCanceled:'',triggered:'y',rejected:'r'};
     icon=ic[st]||'🔹';klass=cl[st]||'';label='ORDER '+st.toUpperCase();
     freq=st==='filled'?880:st==='canceled'?300:0;
     detail=`<span class="v">${ord.coin||''}</span> <span class="tag ${ord.side==='B'?'buy':'sell'}">${ord.side==='B'?'BUY':'SELL'}</span>`
       +(twap?' <span class="tag twap">TWAP</span>':'')
-      +` · <span class="v">${ord.order_type||''}</span>`
-      +`<br>Price <span class="v">${ord.limit_px||''}</span> · Size <span class="v">${ord.sz||''}</span>`;
+      +` · <span class="v">${ord.orderType||''}</span>`
+      +`<br>Price <span class="v">${ord.limitPx||''}</span> · Size <span class="v">${ord.sz||''}</span>`;
 
   }else if(k==='twap_update'){
     const t=ev.twap,tw=t.twap||{},st=t.status;
@@ -191,7 +191,7 @@ function addEvent(ev){
     label='TWAP '+st.toUpperCase();freq=st==='activated'?770:330;
     detail=`<span class="v">${tw.coin||''}</span> <span class="tag ${tw.side==='B'?'buy':'sell'}">${tw.side==='B'?'BUY':'SELL'}</span>`
       +`<br>Size <span class="v">${tw.sz||''}</span> · Duration <span class="v">${tw.minutes||''}m</span>`
-      +(tw.reduce_only?' · <span class="y">ReduceOnly</span>':'');
+      +(tw.reduceOnly?' · <span class="y">ReduceOnly</span>':'');
 
   }else if(k==='liquidation'){
     const l=ev.liq;icon='🚨';klass='r';label='LIQUIDATION';freq=220;
