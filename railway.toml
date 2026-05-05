@@ -1,0 +1,8 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+region = "us-west2"
+restartPolicyType = "always"
+restartPolicyMaxRetries = 10
