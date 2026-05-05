@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"hyperwallettracker/db"
 	"hyperwallettracker/hl"
@@ -158,7 +159,6 @@ func (m *Manager) dispatch(ctx context.Context, evt hl.Event) {
 		return
 	}
 
-	// read chatIDs from in-memory cache — zero DB latency
 	m.mu.RLock()
 	ids := make([]int64, len(m.chatCache[evt.Address]))
 	copy(ids, m.chatCache[evt.Address])
@@ -168,13 +168,18 @@ func (m *Manager) dispatch(ctx context.Context, evt hl.Event) {
 		return
 	}
 
-	// send Telegram notifications concurrently — don't block each other
+	recvAt := time.Now()
+	eventTime := evt.EventTime() // ms timestamp from HL
+	if eventTime > 0 {
+		lag := recvAt.UnixMilli() - eventTime
+		log.Printf("[lag] %s %s: HL→server %dms", evt.Kind, evt.Address[:8], lag)
+	}
+
 	for _, chatID := range ids {
 		chatID := chatID
 		go m.notify(chatID, text)
 	}
 
-	// persist to DB asynchronously — never delays notification
 	go func() {
 		payload, _ := json.Marshal(evt)
 		_ = m.db.SaveEvent(ctx, evt.Address, string(evt.Kind), string(payload))

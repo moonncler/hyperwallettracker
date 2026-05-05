@@ -177,3 +177,18 @@ type Event struct {
 	Order   *OrderUpdate
 	Twap    *TwapUpdate
 }
+
+// EventTime returns the HL-side timestamp in milliseconds (0 if unavailable).
+func (e Event) EventTime() int64 {
+	switch {
+	case e.Fill != nil:
+		return e.Fill.Time
+	case e.Funding != nil:
+		return e.Funding.Time
+	case e.Order != nil:
+		return e.Order.Order.Timestamp
+	case e.Twap != nil:
+		return e.Twap.Twap.Timestamp
+	}
+	return 0
+}
