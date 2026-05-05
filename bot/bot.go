@@ -64,7 +64,7 @@ func New(cfg *config.Config, database *db.DB) (*Bot, error) {
 		db:    database,
 		sendQ: make(chan sendJob, sendQueueCap),
 	}
-	b.manager = tracker.NewManager(database, b.Send)
+	b.manager = tracker.NewManager(database, b.Send, nil)
 	return b, nil
 }
 

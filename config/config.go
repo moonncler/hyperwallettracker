@@ -15,7 +15,8 @@ type Config struct {
 	DBPath        string
 	HLWebsocket   string
 	HLInfoURL     string
-	LocalBotAPI   string // optional: URL of local Telegram Bot API server
+	LocalBotAPI   string
+	Port          string
 }
 
 func Load() *Config {
@@ -27,6 +28,7 @@ func Load() *Config {
 		HLWebsocket:   "wss://api.hyperliquid.xyz/ws",
 		HLInfoURL:     "https://api.hyperliquid.xyz/info",
 		LocalBotAPI:   envOr("LOCAL_BOT_API", ""),
+		Port:          envOr("PORT", "8080"),
 	}
 
 	for _, s := range strings.Split(envOr("ADMIN_IDS", ""), ",") {

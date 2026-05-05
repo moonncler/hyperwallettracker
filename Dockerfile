@@ -14,9 +14,11 @@ RUN apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
 COPY --from=builder /app/hyperwallettracker .
+COPY --from=builder /app/web/static ./web/static
 
 RUN mkdir -p /data
-
 ENV DB_PATH=/data/tracker.db
+ENV PORT=8080
 
+EXPOSE 8080
 CMD ["./hyperwallettracker"]

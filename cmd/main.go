@@ -10,6 +10,7 @@ import (
 	"hyperwallettracker/bot"
 	"hyperwallettracker/config"
 	"hyperwallettracker/db"
+	"hyperwallettracker/web"
 )
 
 func main() {
@@ -23,20 +24,34 @@ func main() {
 	}
 	defer database.Close()
 
+	// WebSocket hub for browser clients
+	hub := web.NewHub()
+
 	tgBot, err := bot.New(cfg, database)
 	if err != nil {
 		log.Fatalf("bot: %v", err)
 	}
 
+	// wire hub broadcast into tracker
+	tgBot.Manager().SetBroadcast(hub.Broadcast)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Restore wallets from DB and start all WS clients
 	if err := tgBot.Manager().Start(ctx); err != nil {
 		log.Fatalf("tracker start: %v", err)
 	}
 
-	log.Println("Bot started. Press Ctrl+C to stop.")
-	tgBot.Run(ctx) // blocks until ctx cancelled
+	// web server
+	addr := ":" + cfg.Port
+	webSrv := web.NewServer(hub, addr)
+	go func() {
+		if err := webSrv.Run(); err != nil {
+			log.Printf("[web] server error: %v", err)
+		}
+	}()
+
+	log.Println("Started. Web UI at http://localhost" + addr)
+	tgBot.Run(ctx)
 	log.Println("Shutdown complete.")
 }

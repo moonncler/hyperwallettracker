@@ -14,13 +14,14 @@ import (
 )
 
 type Notify func(chatID int64, text string)
+type Broadcast func(v interface{})
 
 type Manager struct {
-	db      *db.DB
-	notify  Notify
-	mu      sync.RWMutex
-	clients map[string]*walletEntry
-	// in-memory cache: address -> []chatID (avoids DB hit on every event)
+	db        *db.DB
+	notify    Notify
+	broadcast Broadcast
+	mu        sync.RWMutex
+	clients   map[string]*walletEntry
 	chatCache map[string][]int64
 }
 
@@ -29,14 +30,17 @@ type walletEntry struct {
 	cancel context.CancelFunc
 }
 
-func NewManager(database *db.DB, notify Notify) *Manager {
+func NewManager(database *db.DB, notify Notify, broadcast Broadcast) *Manager {
 	return &Manager{
 		db:        database,
 		notify:    notify,
+		broadcast: broadcast,
 		clients:   make(map[string]*walletEntry),
 		chatCache: make(map[string][]int64),
 	}
 }
+
+func (m *Manager) SetBroadcast(b Broadcast) { m.broadcast = b }
 
 func (m *Manager) Start(ctx context.Context) error {
 	wallets, err := m.db.ListWallets(ctx)
@@ -169,12 +173,17 @@ func (m *Manager) dispatch(ctx context.Context, evt hl.Event) {
 	}
 
 	recvAt := time.Now()
-	eventTime := evt.EventTime() // ms timestamp from HL
+	eventTime := evt.EventTime()
 	if eventTime > 0 {
-		lag := recvAt.UnixMilli() - eventTime
-		log.Printf("[lag] %s %s: HL→server %dms", evt.Kind, evt.Address[:8], lag)
+		log.Printf("[lag] %s %s: HL→server %dms", evt.Kind, evt.Address[:8], recvAt.UnixMilli()-eventTime)
 	}
 
+	// push to web hub instantly (zero extra latency)
+	if m.broadcast != nil {
+		m.broadcast(webPayload(evt))
+	}
+
+	// push to Telegram
 	for _, chatID := range ids {
 		chatID := chatID
 		go m.notify(chatID, text)
@@ -324,4 +333,27 @@ func short(addr string) string {
 
 func itoa(n int64) string {
 	return fmt.Sprintf("%d", n)
+}
+
+// webPayload converts an hl.Event to a JSON-friendly map for the browser.
+func webPayload(evt hl.Event) map[string]interface{} {
+	p := map[string]interface{}{
+		"kind":    evt.Kind,
+		"address": evt.Address,
+	}
+	switch evt.Kind {
+	case hl.KindFill:
+		p["fill"] = evt.Fill
+	case hl.KindFunding:
+		p["funding"] = evt.Funding
+	case hl.KindLiquidation:
+		p["liq"] = evt.Liq
+	case hl.KindNonUserCancel:
+		p["cancel"] = evt.Cancel
+	case hl.KindOrderUpdate:
+		p["order"] = evt.Order
+	case hl.KindTwapUpdate:
+		p["twap"] = evt.Twap
+	}
+	return p
 }

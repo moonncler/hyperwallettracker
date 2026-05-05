@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hyperliquid Tracker</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0d0d0f;
+    --bg2: #141416;
+    --bg3: #1c1c1f;
+    --border: #2a2a2f;
+    --text: #e8e8ee;
+    --muted: #6b6b80;
+    --green: #00c896;
+    --red: #ff4466;
+    --yellow: #f5a623;
+    --blue: #4dabf7;
+    --purple: #9775fa;
+  }
+  body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; height: 100vh; display: flex; flex-direction: column; }
+
+  header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 12px 20px; display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.5px; color: var(--text); }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .status-dot.connected { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .status-dot.connecting { background: var(--yellow); animation: pulse 1s infinite; }
+  #status-text { color: var(--muted); font-size: 11px; }
+  .spacer { flex: 1; }
+  #event-count { color: var(--muted); font-size: 11px; }
+  #sound-btn { background: var(--bg3); border: 1px solid var(--border); color: var(--muted); padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; font-family: inherit; }
+  #sound-btn:hover { color: var(--text); border-color: var(--muted); }
+  #sound-btn.on { color: var(--green); border-color: var(--green); }
+  #clear-btn { background: var(--bg3); border: 1px solid var(--border); color: var(--muted); padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; font-family: inherit; }
+  #clear-btn:hover { color: var(--red); border-color: var(--red); }
+
+  .toolbar { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 8px 20px; display: flex; gap: 8px; flex-wrap: wrap; flex-shrink: 0; }
+  .filter-btn { background: var(--bg3); border: 1px solid var(--border); color: var(--muted); padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; font-family: inherit; }
+  .filter-btn.active { color: var(--text); border-color: var(--blue); }
+  .filter-btn:hover { color: var(--text); }
+
+  #feed { flex: 1; overflow-y: auto; padding: 8px 0; scroll-behavior: smooth; }
+  #feed::-webkit-scrollbar { width: 4px; }
+  #feed::-webkit-scrollbar-track { background: transparent; }
+  #feed::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .event { display: flex; align-items: flex-start; gap: 12px; padding: 8px 20px; border-bottom: 1px solid transparent; transition: background 0.1s; animation: slideIn 0.15s ease-out; }
+  .event:hover { background: var(--bg2); }
+  .event.new { background: rgba(77,171,247,0.04); border-bottom-color: transparent; }
+
+  .event-icon { font-size: 16px; flex-shrink: 0; width: 20px; text-align: center; margin-top: 1px; }
+  .event-body { flex: 1; min-width: 0; }
+  .event-header { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .event-kind { font-weight: 700; font-size: 12px; letter-spacing: 0.5px; }
+  .event-coin { color: var(--text); font-weight: 600; }
+  .event-addr { color: var(--muted); font-size: 11px; }
+  .event-time { color: var(--muted); font-size: 10px; margin-left: auto; flex-shrink: 0; }
+  .event-details { margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+  .val { color: var(--text); }
+  .green { color: var(--green); }
+  .red { color: var(--red); }
+  .yellow { color: var(--yellow); }
+  .blue { color: var(--blue); }
+  .purple { color: var(--purple); }
+  .tag { display: inline-block; background: var(--bg3); border: 1px solid var(--border); border-radius: 2px; padding: 0 5px; font-size: 10px; color: var(--muted); vertical-align: middle; }
+  .tag.twap { color: var(--purple); border-color: var(--purple); }
+  .tag.buy { color: var(--green); border-color: var(--green); }
+  .tag.sell { color: var(--red); border-color: var(--red); }
+
+  #empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--muted); gap: 8px; }
+  #empty .big { font-size: 32px; }
+
+  @keyframes slideIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="status-dot connecting" id="dot"></div>
+  <h1>⚡ Hyperliquid Tracker</h1>
+  <span id="status-text">connecting…</span>
+  <div class="spacer"></div>
+  <span id="event-count">0 events</span>
+  <button id="sound-btn">🔇 sound</button>
+  <button id="clear-btn">clear</button>
+</header>
+
+<div class="toolbar">
+  <button class="filter-btn active" data-kind="all">ALL</button>
+  <button class="filter-btn" data-kind="fill">FILLS</button>
+  <button class="filter-btn" data-kind="order_update">ORDERS</button>
+  <button class="filter-btn" data-kind="twap_update">TWAP</button>
+  <button class="filter-btn" data-kind="liquidation">LIQUIDATIONS</button>
+  <button class="filter-btn" data-kind="funding">FUNDING</button>
+</div>
+
+<div id="feed">
+  <div id="empty"><div class="big">📡</div><div>Waiting for events…</div></div>
+</div>
+
+<script>
+const feed = document.getElementById('feed');
+const empty = document.getElementById('empty');
+const dot = document.getElementById('dot');
+const statusText = document.getElementById('status-text');
+const countEl = document.getElementById('event-count');
+const soundBtn = document.getElementById('sound-btn');
+const clearBtn = document.getElementById('clear-btn');
+
+let soundOn = false;
+let eventCount = 0;
+let activeFilter = 'all';
+let autoScroll = true;
+let audioCtx = null;
+
+soundBtn.onclick = () => {
+  soundOn = !soundOn;
+  soundBtn.textContent = soundOn ? '🔊 sound' : '🔇 sound';
+  soundBtn.className = soundOn ? 'on' : '';
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+};
+
+clearBtn.onclick = () => {
+  feed.querySelectorAll('.event').forEach(e => e.remove());
+  eventCount = 0;
+  countEl.textContent = '0 events';
+  empty.style.display = 'flex';
+};
+
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeFilter = btn.dataset.kind;
+    feed.querySelectorAll('.event').forEach(ev => {
+      ev.style.display = (activeFilter === 'all' || ev.dataset.kind === activeFilter) ? '' : 'none';
+    });
+  };
+});
+
+feed.onscroll = () => {
+  autoScroll = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 40;
+};
+
+function beep(freq = 880, dur = 80, vol = 0.15) {
+  if (!soundOn || !audioCtx) return;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.connect(g); g.connect(audioCtx.destination);
+  o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur/1000);
+  o.start(); o.stop(audioCtx.currentTime + dur/1000);
+}
+
+function fmt(n) { return parseFloat(n).toLocaleString('en-US', {maximumFractionDigits: 4}); }
+function fmtUsd(n) { const v = parseFloat(n); return (v >= 0 ? '+' : '') + v.toFixed(2); }
+function short(addr) { return addr ? addr.slice(0,6)+'…'+addr.slice(-4) : ''; }
+function timeStr() {
+  const d = new Date();
+  return d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0')+':'+d.getSeconds().toString().padStart(2,'0')+'.'+d.getMilliseconds().toString().padStart(3,'0');
+}
+
+function renderEvent(ev) {
+  const k = ev.kind;
+  let icon, kindClass, kindLabel, details, freq;
+
+  if (k === 'fill') {
+    const f = ev.fill;
+    const isBuy = f.side === 'B';
+    const isTwap = f.twap_id != null;
+    icon = isBuy ? '🟢' : '🔴';
+    kindClass = isBuy ? 'green' : 'red';
+    kindLabel = 'FILL';
+    freq = isBuy ? 660 : 440;
+    const pnl = f.closed_pnl && parseFloat(f.closed_pnl) !== 0
+      ? `<span class="${parseFloat(f.closed_pnl)>0?'green':'red'}"> PnL ${fmtUsd(f.closed_pnl)} USDC</span>` : '';
+    details = `<span class="val">${f.coin}</span> `
+      + `<span class="${isBuy?'tag buy':'tag sell'}">${isBuy?'BUY':'SELL'}</span>`
+      + (isTwap ? ' <span class="tag twap">TWAP</span>' : '')
+      + (f.dir ? ` <span class="muted">${f.dir}</span>` : '')
+      + `<br>Price <span class="val">${fmt(f.px)}</span> · Size <span class="val">${fmt(f.sz)}</span>`
+      + pnl
+      + ` · Fee <span class="val">${f.fee} ${f.fee_token}</span>`;
+
+  } else if (k === 'order_update') {
+    const o = ev.order;
+    const st = o.status;
+    const isTwap = o.order?.twap_id != null;
+    const icons = {open:'🔷',filled:'✅',canceled:'❌',marginCanceled:'❌',triggered:'⚡',rejected:'🚫'};
+    const colors = {open:'blue',filled:'green',canceled:'muted',marginCanceled:'muted',triggered:'yellow',rejected:'red'};
+    icon = icons[st] || '🔹';
+    kindClass = colors[st] || '';
+    kindLabel = 'ORDER ' + st.toUpperCase();
+    freq = st === 'filled' ? 880 : st === 'canceled' ? 300 : 550;
+    const ord = o.order || {};
+    details = `<span class="val">${ord.coin||''}</span> `
+      + `<span class="${ord.side==='B'?'tag buy':'tag sell'}">${ord.side==='B'?'BUY':'SELL'}</span>`
+      + (isTwap ? ' <span class="tag twap">TWAP</span>' : '')
+      + ` · <span class="val">${ord.order_type||''}</span>`
+      + `<br>Price <span class="val">${ord.limit_px||''}</span> · Size <span class="val">${ord.sz||''}</span>`;
+
+  } else if (k === 'twap_update') {
+    const t = ev.twap;
+    const tw = t.twap || {};
+    const st = t.status;
+    const icons2 = {activated:'🚀',terminated:'🛑',finished:'✅'};
+    icon = icons2[st] || '🔄';
+    kindClass = st==='activated'?'purple': st==='finished'?'green':'red';
+    kindLabel = 'TWAP ' + st.toUpperCase();
+    freq = st === 'activated' ? 770 : 330;
+    details = `<span class="val">${tw.coin||''}</span> `
+      + `<span class="${tw.side==='B'?'tag buy':'tag sell'}">${tw.side==='B'?'BUY':'SELL'}</span>`
+      + `<br>Size <span class="val">${tw.sz||''}</span> · Duration <span class="val">${tw.minutes||''}m</span>`
+      + (tw.reduce_only ? ' · <span class="yellow">ReduceOnly</span>' : '');
+
+  } else if (k === 'liquidation') {
+    const l = ev.liq;
+    icon = '🚨';
+    kindClass = 'red';
+    kindLabel = 'LIQUIDATION';
+    freq = 220;
+    details = `Notional <span class="red">${l.liquidated_ntl}</span> · Fee <span class="val">${l.liquidated_fee}</span>`;
+
+  } else if (k === 'funding') {
+    const f = ev.funding;
+    const pos = parseFloat(f.usdc) >= 0;
+    icon = pos ? '📈' : '📉';
+    kindClass = pos ? 'green' : 'red';
+    kindLabel = 'FUNDING';
+    freq = 0;
+    details = `<span class="val">${f.coin}</span> · <span class="${pos?'green':'red'}">${fmtUsd(f.usdc)} USDC</span> · Rate <span class="val">${f.funding_rate}</span>`;
+
+  } else if (k === 'non_user_cancel') {
+    icon = '⚠️'; kindClass = 'yellow'; kindLabel = 'SYS CANCEL'; freq = 0;
+    details = `<span class="val">${ev.cancel?.coin||''}</span>`;
+  } else {
+    return;
+  }
+
+  if (freq) beep(freq);
+
+  const div = document.createElement('div');
+  div.className = 'event new';
+  div.dataset.kind = k;
+  if (activeFilter !== 'all' && activeFilter !== k) div.style.display = 'none';
+
+  div.innerHTML = `
+    <div class="event-icon">${icon}</div>
+    <div class="event-body">
+      <div class="event-header">
+        <span class="event-kind ${kindClass}">${kindLabel}</span>
+        <span class="event-addr">${short(ev.address)}</span>
+        <span class="event-time">${timeStr()}</span>
+      </div>
+      <div class="event-details">${details}</div>
+    </div>`;
+
+  empty.style.display = 'none';
+  feed.insertBefore(div, feed.firstChild);
+
+  // keep max 200 events in DOM
+  const all = feed.querySelectorAll('.event');
+  if (all.length > 200) all[all.length-1].remove();
+
+  eventCount++;
+  countEl.textContent = eventCount + ' event' + (eventCount===1?'':'s');
+
+  setTimeout(() => div.classList.remove('new'), 1000);
+
+  if (Notification.permission === 'granted' && document.hidden) {
+    new Notification('Hyperliquid · ' + kindLabel, { body: ev.fill?.coin || ev.order?.order?.coin || '', silent: true });
+  }
+}
+
+// WebSocket connection with auto-reconnect
+let ws, reconnTimer;
+function connect() {
+  clearTimeout(reconnTimer);
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    dot.className = 'status-dot connected';
+    statusText.textContent = 'connected';
+  };
+  ws.onmessage = e => {
+    try { renderEvent(JSON.parse(e.data)); } catch {}
+  };
+  ws.onclose = ws.onerror = () => {
+    dot.className = 'status-dot connecting';
+    statusText.textContent = 'reconnecting…';
+    reconnTimer = setTimeout(connect, 1500);
+  };
+}
+
+// Request desktop notifications
+if (Notification.permission === 'default') Notification.requestPermission();
+
+connect();
+</script>
+</body>
+</html>
