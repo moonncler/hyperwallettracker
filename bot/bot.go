@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	sendWorkers  = 8   // parallel Telegram senders
-	sendQueueCap = 512 // buffered outbound queue
+	sendWorkers  = 8
+	sendQueueCap = 512
 )
 
 type sendJob struct {
@@ -34,7 +34,7 @@ type Bot struct {
 }
 
 func New(cfg *config.Config, database *db.DB) (*Bot, error) {
-	// tuned HTTP client: keep-alive pool, fast timeouts
+	// Timeout must be > long-poll interval (30s). 60s covers send + polling.
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{
@@ -46,7 +46,7 @@ func New(cfg *config.Config, database *db.DB) (*Bot, error) {
 			IdleConnTimeout:     90 * time.Second,
 			TLSHandshakeTimeout: 5 * time.Second,
 		},
-		Timeout: 10 * time.Second,
+		Timeout: 60 * time.Second,
 	}
 
 	api, err := tgbotapi.NewBotAPIWithClient(cfg.TelegramToken, tgbotapi.APIEndpoint, httpClient)
@@ -66,7 +66,6 @@ func New(cfg *config.Config, database *db.DB) (*Bot, error) {
 
 func (b *Bot) Manager() *tracker.Manager { return b.manager }
 
-// startSenders launches worker pool for outbound Telegram messages.
 func (b *Bot) startSenders(ctx context.Context) {
 	for i := 0; i < sendWorkers; i++ {
 		go func() {
@@ -87,7 +86,6 @@ func (b *Bot) startSenders(ctx context.Context) {
 	}
 }
 
-// Send is called from tracker goroutines — non-blocking enqueue.
 func (b *Bot) Send(chatID int64, text string) {
 	select {
 	case b.sendQ <- sendJob{chatID, text}:
@@ -100,7 +98,6 @@ func (b *Bot) reply(chatID int64, text string) {
 	b.Send(chatID, text)
 }
 
-// Run starts the update polling loop (blocking).
 func (b *Bot) Run(ctx context.Context) {
 	b.startSenders(ctx)
 
