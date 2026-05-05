@@ -208,8 +208,45 @@ func formatEvent(evt hl.Event) string {
 			"📌 " + o.Order.Coin + " · " + sideStr(o.Order.Side) + "\n" +
 			"📋 Type: " + o.Order.OrderType + "\n" +
 			"💲 " + o.Order.LimitPx + " · Sz: " + o.Order.Sz
+
+	case hl.KindTwapUpdate:
+		t := evt.Twap
+		emoji, action := twapStatusEmoji(t.Status)
+		side := "🟢 BUY"
+		if t.Twap.Side == "A" {
+			side = "🔴 SELL"
+		}
+		reduceOnly := ""
+		if t.Twap.ReduceOnly {
+			reduceOnly = " · Reduce Only"
+		}
+		return fmt.Sprintf(
+			"%s <b>TWAP %s</b>\n"+
+				"👛 <code>%s</code>\n"+
+				"📌 %s · %s%s\n"+
+				"📦 Size: %s · Duration: %dm\n"+
+				"🆔 ID: %d",
+			emoji, action,
+			short(evt.Address),
+			t.Twap.Coin, side, reduceOnly,
+			t.Twap.Sz, t.Twap.Minutes,
+			t.Twap.TwapID,
+		)
 	}
 	return ""
+}
+
+func twapStatusEmoji(status string) (string, string) {
+	switch status {
+	case "activated":
+		return "🚀", "STARTED"
+	case "terminated":
+		return "🛑", "CANCELLED"
+	case "finished":
+		return "✅", "FINISHED"
+	default:
+		return "🔄", strings.ToUpper(status)
+	}
 }
 
 func orderEmoji(status string) string {

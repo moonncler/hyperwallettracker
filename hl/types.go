@@ -135,6 +135,25 @@ type OpenOrder struct {
 	TwapID    *int64 `json:"twapId"`
 }
 
+// ── TWAP ─────────────────────────────────────────────────────────────────────
+
+type TwapUpdate struct {
+	Status string    `json:"status"` // "activated","terminated","finished"
+	Twap   TwapOrder `json:"twap"`
+}
+
+type TwapOrder struct {
+	Coin      string `json:"coin"`
+	Side      string `json:"side"` // "B" / "A"
+	Sz        string `json:"sz"`
+	ReduceOnly bool  `json:"reduceOnly"`
+	Minutes   int    `json:"minutes"`
+	Randomize bool   `json:"randomize"`
+	TwapID    int64  `json:"id"`
+	User      string `json:"user"`
+	Timestamp int64  `json:"timestamp"`
+}
+
 // ── Event kinds emitted to tracker ──────────────────────────────────────────
 
 type EventKind string
@@ -145,6 +164,7 @@ const (
 	KindLiquidation   EventKind = "liquidation"
 	KindNonUserCancel EventKind = "non_user_cancel"
 	KindOrderUpdate   EventKind = "order_update"
+	KindTwapUpdate    EventKind = "twap_update"
 )
 
 type Event struct {
@@ -155,4 +175,5 @@ type Event struct {
 	Liq     *Liquidation
 	Cancel  *OrderCancel
 	Order   *OrderUpdate
+	Twap    *TwapUpdate
 }

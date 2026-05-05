@@ -102,6 +102,7 @@ func (c *Client) connect() error {
 		{"type": "userEvents", "user": c.Address},
 		{"type": "userFills", "user": c.Address},
 		{"type": "orderUpdates", "user": c.Address},
+		{"type": "userTwapHistory", "user": c.Address},
 	}
 	for _, sub := range subs {
 		msg := map[string]interface{}{"method": "subscribe", "subscription": sub}
@@ -189,6 +190,22 @@ func (c *Client) handleRaw(raw []byte) {
 		}
 		for i := range updates {
 			c.emit(Event{Address: c.Address, Kind: KindOrderUpdate, Order: &updates[i]})
+		}
+
+	case "userTwapHistory":
+		// envelope: {"isSnapshot": bool, "history": [...]}
+		var wrapper struct {
+			IsSnapshot bool         `json:"isSnapshot"`
+			History    []TwapUpdate `json:"history"`
+		}
+		if err := json.Unmarshal(env.Data, &wrapper); err != nil {
+			return
+		}
+		if wrapper.IsSnapshot {
+			return
+		}
+		for i := range wrapper.History {
+			c.emit(Event{Address: c.Address, Kind: KindTwapUpdate, Twap: &wrapper.History[i]})
 		}
 	}
 }
