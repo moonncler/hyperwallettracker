@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -77,7 +78,12 @@ func (c *Client) Run() {
 }
 
 func (c *Client) connect() error {
-	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	dialer := websocket.Dialer{
+		HandshakeTimeout:  10 * time.Second,
+		ReadBufferSize:    65536,
+		WriteBufferSize:   4096,
+		EnableCompression: false, // compression adds CPU latency
+	}
 	conn, _, err := dialer.DialContext(c.ctx, wsURL, nil)
 	if err != nil {
 		return err
@@ -220,6 +226,20 @@ func (c *Client) emit(e Event) {
 
 // ── REST helpers ─────────────────────────────────────────────────────────────
 
+var restClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     60 * time.Second,
+		TLSHandshakeTimeout: 5 * time.Second,
+		DisableCompression:  true,
+	},
+	Timeout: 8 * time.Second,
+}
+
 func post(ctx context.Context, payload interface{}) ([]byte, error) {
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -230,7 +250,7 @@ func post(ctx context.Context, payload interface{}) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := restClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

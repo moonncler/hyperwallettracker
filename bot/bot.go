@@ -3,8 +3,10 @@ package bot
 import (
 	"context"
 	"log"
+	"net"
+	"net/http"
 	"strings"
-	"sync"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -13,23 +15,50 @@ import (
 	"hyperwallettracker/tracker"
 )
 
+const (
+	sendWorkers  = 8   // parallel Telegram senders
+	sendQueueCap = 512 // buffered outbound queue
+)
+
+type sendJob struct {
+	chatID int64
+	text   string
+}
+
 type Bot struct {
 	api     *tgbotapi.BotAPI
 	cfg     *config.Config
 	db      *db.DB
 	manager *tracker.Manager
-	mu      sync.Mutex
+	sendQ   chan sendJob
 }
 
 func New(cfg *config.Config, database *db.DB) (*Bot, error) {
-	api, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
+	// tuned HTTP client: keep-alive pool, fast timeouts
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:        sendWorkers * 2,
+			MaxIdleConnsPerHost: sendWorkers * 2,
+			IdleConnTimeout:     90 * time.Second,
+			TLSHandshakeTimeout: 5 * time.Second,
+		},
+		Timeout: 10 * time.Second,
+	}
+
+	api, err := tgbotapi.NewBotAPIWithClient(cfg.TelegramToken, tgbotapi.APIEndpoint, httpClient)
 	if err != nil {
 		return nil, err
 	}
+
 	b := &Bot{
-		api: api,
-		cfg: cfg,
-		db:  database,
+		api:   api,
+		cfg:   cfg,
+		db:    database,
+		sendQ: make(chan sendJob, sendQueueCap),
 	}
 	b.manager = tracker.NewManager(database, b.Send)
 	return b, nil
@@ -37,13 +66,33 @@ func New(cfg *config.Config, database *db.DB) (*Bot, error) {
 
 func (b *Bot) Manager() *tracker.Manager { return b.manager }
 
-// Send delivers a message to a chat (called from tracker goroutines).
+// startSenders launches worker pool for outbound Telegram messages.
+func (b *Bot) startSenders(ctx context.Context) {
+	for i := 0; i < sendWorkers; i++ {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case job := <-b.sendQ:
+					msg := tgbotapi.NewMessage(job.chatID, job.text)
+					msg.ParseMode = tgbotapi.ModeHTML
+					msg.DisableWebPagePreview = true
+					if _, err := b.api.Send(msg); err != nil {
+						log.Printf("[bot] send to %d: %v", job.chatID, err)
+					}
+				}
+			}
+		}()
+	}
+}
+
+// Send is called from tracker goroutines — non-blocking enqueue.
 func (b *Bot) Send(chatID int64, text string) {
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = tgbotapi.ModeHTML
-	msg.DisableWebPagePreview = true
-	if _, err := b.api.Send(msg); err != nil {
-		log.Printf("[bot] send to %d: %v", chatID, err)
+	select {
+	case b.sendQ <- sendJob{chatID, text}:
+	default:
+		log.Printf("[bot] send queue full, dropping message to %d", chatID)
 	}
 }
 
@@ -53,6 +102,8 @@ func (b *Bot) reply(chatID int64, text string) {
 
 // Run starts the update polling loop (blocking).
 func (b *Bot) Run(ctx context.Context) {
+	b.startSenders(ctx)
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 30
 	updates := b.api.GetUpdatesChan(u)
@@ -71,7 +122,7 @@ func (b *Bot) Run(ctx context.Context) {
 			if upd.Message == nil {
 				continue
 			}
-			b.handleMessage(ctx, upd.Message)
+			go b.handleMessage(ctx, upd.Message)
 		}
 	}
 }

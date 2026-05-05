@@ -12,15 +12,15 @@ import (
 	"hyperwallettracker/hl"
 )
 
-// Notify is the callback the bot registers: send message to chatID.
 type Notify func(chatID int64, text string)
 
-// Manager tracks all wallets, starts/stops hl.Client goroutines.
 type Manager struct {
 	db      *db.DB
 	notify  Notify
 	mu      sync.RWMutex
-	clients map[string]*walletEntry // keyed by lowercase address
+	clients map[string]*walletEntry
+	// in-memory cache: address -> []chatID (avoids DB hit on every event)
+	chatCache map[string][]int64
 }
 
 type walletEntry struct {
@@ -30,54 +30,82 @@ type walletEntry struct {
 
 func NewManager(database *db.DB, notify Notify) *Manager {
 	return &Manager{
-		db:      database,
-		notify:  notify,
-		clients: make(map[string]*walletEntry),
+		db:        database,
+		notify:    notify,
+		clients:   make(map[string]*walletEntry),
+		chatCache: make(map[string][]int64),
 	}
 }
 
-// Start restores all wallets from DB and begins tracking.
 func (m *Manager) Start(ctx context.Context) error {
 	wallets, err := m.db.ListWallets(ctx)
 	if err != nil {
 		return err
 	}
 	for _, w := range wallets {
+		m.addToCache(w.Address, w.ChatID)
 		m.startClient(ctx, w.Address)
 	}
 	return nil
 }
 
-// AddWallet adds a wallet to the DB and starts tracking if not already.
 func (m *Manager) AddWallet(ctx context.Context, address, label string, chatID int64) error {
 	address = strings.ToLower(address)
 	if err := m.db.AddWallet(ctx, address, label, chatID); err != nil {
 		return err
 	}
-	m.mu.Lock()
+	m.addToCache(address, chatID)
+
+	m.mu.RLock()
 	_, exists := m.clients[address]
-	m.mu.Unlock()
+	m.mu.RUnlock()
 	if !exists {
 		m.startClient(ctx, address)
 	}
 	return nil
 }
 
-// RemoveWallet removes a chat's subscription; stops the WS client only if no
-// other chats are still watching the same address.
 func (m *Manager) RemoveWallet(ctx context.Context, address string, chatID int64) error {
 	address = strings.ToLower(address)
 	if err := m.db.RemoveWallet(ctx, address, chatID); err != nil {
 		return err
 	}
-	remaining, err := m.db.GetChatsForWallet(ctx, address)
-	if err != nil {
-		return err
-	}
+	m.removeFromCache(address, chatID)
+
+	m.mu.RLock()
+	remaining := m.getCached(address)
+	m.mu.RUnlock()
 	if len(remaining) == 0 {
 		m.stopClient(address)
 	}
 	return nil
+}
+
+func (m *Manager) addToCache(address string, chatID int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range m.chatCache[address] {
+		if id == chatID {
+			return
+		}
+	}
+	m.chatCache[address] = append(m.chatCache[address], chatID)
+}
+
+func (m *Manager) removeFromCache(address string, chatID int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := m.chatCache[address]
+	for i, id := range ids {
+		if id == chatID {
+			m.chatCache[address] = append(ids[:i], ids[i+1:]...)
+			return
+		}
+	}
+}
+
+func (m *Manager) getCached(address string) []int64 {
+	return m.chatCache[address]
 }
 
 func (m *Manager) startClient(parentCtx context.Context, address string) {
@@ -90,7 +118,7 @@ func (m *Manager) startClient(parentCtx context.Context, address string) {
 
 	go func() {
 		log.Printf("[tracker] start %s", address)
-		client.Run() // blocks; reconnects internally
+		client.Run()
 		log.Printf("[tracker] stopped %s", address)
 	}()
 
@@ -102,6 +130,7 @@ func (m *Manager) stopClient(address string) {
 	entry, ok := m.clients[address]
 	if ok {
 		delete(m.clients, address)
+		delete(m.chatCache, address)
 	}
 	m.mu.Unlock()
 	if ok {
@@ -124,26 +153,34 @@ func (m *Manager) consume(ctx context.Context, address string, client *hl.Client
 }
 
 func (m *Manager) dispatch(ctx context.Context, evt hl.Event) {
-	chatIDs, err := m.db.GetChatsForWallet(ctx, evt.Address)
-	if err != nil || len(chatIDs) == 0 {
-		return
-	}
-
 	text := formatEvent(evt)
 	if text == "" {
 		return
 	}
 
-	// persist to DB (best-effort)
-	payload, _ := json.Marshal(evt)
-	_ = m.db.SaveEvent(ctx, evt.Address, string(evt.Kind), string(payload))
+	// read chatIDs from in-memory cache — zero DB latency
+	m.mu.RLock()
+	ids := make([]int64, len(m.chatCache[evt.Address]))
+	copy(ids, m.chatCache[evt.Address])
+	m.mu.RUnlock()
 
-	for _, chatID := range chatIDs {
-		m.notify(chatID, text)
+	if len(ids) == 0 {
+		return
 	}
+
+	// send Telegram notifications concurrently — don't block each other
+	for _, chatID := range ids {
+		chatID := chatID
+		go m.notify(chatID, text)
+	}
+
+	// persist to DB asynchronously — never delays notification
+	go func() {
+		payload, _ := json.Marshal(evt)
+		_ = m.db.SaveEvent(ctx, evt.Address, string(evt.Kind), string(payload))
+	}()
 }
 
-// formatEvent builds the Telegram message for an event.
 func formatEvent(evt hl.Event) string {
 	switch evt.Kind {
 
@@ -175,7 +212,7 @@ func formatEvent(evt hl.Event) string {
 	case hl.KindFunding:
 		fn := evt.Funding
 		sign := "📈"
-		if fn.Usdc[0] == '-' {
+		if len(fn.Usdc) > 0 && fn.Usdc[0] == '-' {
 			sign = "📉"
 		}
 		return sign + " <b>FUNDING</b>\n" +
