@@ -21,21 +21,20 @@ const (
 	infoURL = "https://api.hyperliquid.xyz/info"
 )
 
-// Client tracks one wallet address over WebSocket.
 type Client struct {
-	Address  string
-	Events   chan Event
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	conn     *websocket.Conn
+	Address string
+	Events  chan Event
+	ctx     context.Context
+	cancel  context.CancelFunc
+	mu      sync.Mutex
+	conn    *websocket.Conn
 }
 
 func NewClient(ctx context.Context, address string) *Client {
 	ctx, cancel := context.WithCancel(ctx)
 	return &Client{
 		Address: strings.ToLower(address),
-		Events:  make(chan Event, 256),
+		Events:  make(chan Event, 512),
 		ctx:     ctx,
 		cancel:  cancel,
 	}
@@ -50,7 +49,6 @@ func (c *Client) Stop() {
 	c.mu.Unlock()
 }
 
-// Run connects and streams events; reconnects on any error.
 func (c *Client) Run() {
 	defer close(c.Events)
 	backoff := time.Second
@@ -62,7 +60,7 @@ func (c *Client) Run() {
 		}
 		err := c.connect()
 		if err != nil && c.ctx.Err() == nil {
-			log.Printf("[hl] %s — reconnect in %s: %v", c.Address, backoff, err)
+			log.Printf("[hl] %s reconnect in %s: %v", c.Address, backoff, err)
 			select {
 			case <-time.After(backoff):
 			case <-c.ctx.Done():
@@ -82,7 +80,7 @@ func (c *Client) connect() error {
 		HandshakeTimeout:  10 * time.Second,
 		ReadBufferSize:    65536,
 		WriteBufferSize:   4096,
-		EnableCompression: false, // compression adds CPU latency
+		EnableCompression: false,
 	}
 	conn, _, err := dialer.DialContext(c.ctx, wsURL, nil)
 	if err != nil {
@@ -98,26 +96,32 @@ func (c *Client) connect() error {
 		conn.Close()
 	}()
 
-	// ping keepalive
 	conn.SetPongHandler(func(string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		return nil
 	})
 
+	// Subscribe:
+	// - userEvents  → fills, funding, liquidation, nonUserCancel
+	// - orderUpdates → order lifecycle
+	// - userTwapHistory → twap start/stop
+	// NOTE: userFills is intentionally NOT subscribed — userEvents already
+	// contains fills. Subscribing both causes duplicate notifications.
 	subs := []map[string]interface{}{
 		{"type": "userEvents", "user": c.Address},
-		{"type": "userFills", "user": c.Address},
 		{"type": "orderUpdates", "user": c.Address},
 		{"type": "userTwapHistory", "user": c.Address},
 	}
 	for _, sub := range subs {
-		msg := map[string]interface{}{"method": "subscribe", "subscription": sub}
-		if err := conn.WriteJSON(msg); err != nil {
+		if err := conn.WriteJSON(map[string]interface{}{
+			"method":       "subscribe",
+			"subscription": sub,
+		}); err != nil {
 			return fmt.Errorf("subscribe: %w", err)
 		}
 	}
 
-	// ping goroutine
+	// keepalive ping
 	go func() {
 		tick := time.NewTicker(20 * time.Second)
 		defer tick.Stop()
@@ -127,25 +131,47 @@ func (c *Client) connect() error {
 				return
 			case <-tick.C:
 				c.mu.Lock()
-				if c.conn == conn {
+				ok := c.conn == conn
+				c.mu.Unlock()
+				if ok {
 					_ = conn.WriteMessage(websocket.PingMessage, nil)
 				}
-				c.mu.Unlock()
 			}
 		}
 	}()
 
-	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-	for {
-		_, raw, err := conn.ReadMessage()
-		if err != nil {
-			if c.ctx.Err() != nil {
-				return nil
+	// raw message channel — decouple read from parse
+	rawCh := make(chan []byte, 128)
+	go func() {
+		defer close(rawCh)
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
 			}
-			return err
+			select {
+			case rawCh <- raw:
+			default:
+				// parser falling behind — drop rather than block reader
+			}
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		c.handleRaw(raw)
+	}()
+
+	// parse loop runs in this goroutine
+	for {
+		select {
+		case <-c.ctx.Done():
+			return nil
+		case raw, ok := <-rawCh:
+			if !ok {
+				if c.ctx.Err() != nil {
+					return nil
+				}
+				return fmt.Errorf("connection closed")
+			}
+			c.handleRaw(raw)
+		}
 	}
 }
 
@@ -159,18 +185,6 @@ func (c *Client) handleRaw(raw []byte) {
 	}
 
 	switch env.Channel {
-	case "userFills":
-		var d UserFillsData
-		if err := json.Unmarshal(env.Data, &d); err != nil {
-			return
-		}
-		if d.IsSnapshot {
-			return
-		}
-		for i := range d.Fills {
-			c.emit(Event{Address: c.Address, Kind: KindFill, Fill: &d.Fills[i]})
-		}
-
 	case "userEvents":
 		var d UserEventsData
 		if err := json.Unmarshal(env.Data, &d); err != nil {
@@ -199,7 +213,6 @@ func (c *Client) handleRaw(raw []byte) {
 		}
 
 	case "userTwapHistory":
-		// envelope: {"isSnapshot": bool, "history": [...]}
 		var wrapper struct {
 			IsSnapshot bool         `json:"isSnapshot"`
 			History    []TwapUpdate `json:"history"`
@@ -220,11 +233,10 @@ func (c *Client) emit(e Event) {
 	select {
 	case c.Events <- e:
 	default:
-		// drop if consumer is slow — never block the WS reader
 	}
 }
 
-// ── REST helpers ─────────────────────────────────────────────────────────────
+// ── REST ──────────────────────────────────────────────────────────────────────
 
 var restClient = &http.Client{
 	Transport: &http.Transport{
