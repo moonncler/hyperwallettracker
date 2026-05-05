@@ -62,18 +62,21 @@ func (c *Client) Run() {
 		default:
 		}
 		err := c.connect()
-		if err != nil && c.ctx.Err() == nil {
-			log.Printf("[hl] %s reconnect in %s: %v", c.Address, backoff, err)
-			select {
-			case <-time.After(backoff):
-			case <-c.ctx.Done():
-				return
-			}
-			if backoff < 30*time.Second {
-				backoff *= 2
-			}
+		if c.ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			log.Printf("[hl] %s error: %v — reconnect in %s", c.Address, err, backoff)
 		} else {
-			backoff = time.Second
+			log.Printf("[hl] %s disconnected — reconnect in %s", c.Address, backoff)
+		}
+		select {
+		case <-time.After(backoff):
+		case <-c.ctx.Done():
+			return
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
 		}
 	}
 }
@@ -162,7 +165,7 @@ func (c *Client) connect() error {
 				if c.ctx.Err() != nil {
 					return nil
 				}
-				return fmt.Errorf("connection closed")
+				return fmt.Errorf("ws read loop exited")
 			}
 			c.handleRaw(raw)
 		}
