@@ -88,10 +88,13 @@ func (c *Client) connect() error {
 		WriteBufferSize:   4096,
 		EnableCompression: false,
 	}
+	log.Printf("[hl] %s dialing…", c.Address)
 	conn, _, err := dialer.DialContext(c.ctx, wsURL, nil)
 	if err != nil {
+		log.Printf("[hl] %s dial error: %v", c.Address, err)
 		return err
 	}
+	log.Printf("[hl] %s connected", c.Address)
 	c.mu.Lock()
 	c.conn = conn
 	c.mu.Unlock()
@@ -134,8 +137,9 @@ func (c *Client) connect() error {
 			"method":       "subscribe",
 			"subscription": sub,
 		}); err != nil {
-			return fmt.Errorf("subscribe: %w", err)
+			return fmt.Errorf("subscribe %v: %w", sub["type"], err)
 		}
+		log.Printf("[hl] %s subscribed: %s", c.Address, sub["type"])
 	}
 
 	// decouple read from parse
@@ -146,6 +150,7 @@ func (c *Client) connect() error {
 			_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 			_, raw, err := conn.ReadMessage()
 			if err != nil {
+				log.Printf("[hl] %s read error: %v", c.Address, err)
 				return
 			}
 			select {
