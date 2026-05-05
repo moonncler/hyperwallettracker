@@ -121,9 +121,10 @@ func (c *Client) connect() error {
 		}
 	}()
 
+	// userEvents covers fills, funding, liquidation, nonUserCancel, and orders.
+	// orderUpdates is intentionally removed — it duplicates userEvents order data.
 	subs := []map[string]interface{}{
 		{"type": "userEvents", "user": c.Address},
-		{"type": "orderUpdates", "user": c.Address},
 		{"type": "userTwapHistory", "user": c.Address},
 	}
 	for _, sub := range subs {
