@@ -16,7 +16,6 @@ WORKDIR /app
 COPY --from=builder /app/hyperwallettracker .
 
 RUN mkdir -p /data
-VOLUME ["/data"]
 
 ENV DB_PATH=/data/tracker.db
 
