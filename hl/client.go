@@ -26,9 +26,10 @@ type Client struct {
 	Events     chan Event
 	ctx        context.Context
 	cancel     context.CancelFunc
-	mu         sync.Mutex
+	mu         sync.Mutex // guards conn
+	dedupMu    sync.Mutex // guards seenOrders
 	conn       *websocket.Conn
-	seenOrders map[string]struct{} // persistent dedup across reconnects
+	seenOrders map[string]struct{}
 }
 
 func NewClient(ctx context.Context, address string) *Client {
@@ -182,7 +183,12 @@ func (c *Client) handleRaw(raw []byte) {
 		if err := json.Unmarshal(env.Data, &d); err != nil {
 			return
 		}
+		// fills, funding, liquidation, nonUserCancel only
+		// order events come exclusively from orderUpdates to avoid duplicates
 		for i := range d.Fills {
+			if !c.dedup("fill:" + d.Fills[i].Hash) {
+				continue
+			}
 			c.emit(Event{Address: c.Address, Kind: KindFill, Fill: &d.Fills[i]})
 		}
 		for i := range d.Funding {
@@ -194,6 +200,7 @@ func (c *Client) handleRaw(raw []byte) {
 		for i := range d.NonUserCancel {
 			c.emit(Event{Address: c.Address, Kind: KindNonUserCancel, Cancel: &d.NonUserCancel[i]})
 		}
+		// NOTE: d.Fills from userEvents can duplicate orderUpdates fills — dedup via seenOrders covers this
 
 	case "orderUpdates":
 		var updates []OrderUpdate
@@ -201,17 +208,8 @@ func (c *Client) handleRaw(raw []byte) {
 			return
 		}
 		for i := range updates {
-			key := fmt.Sprintf("%d:%s", updates[i].Order.Oid, updates[i].Status)
-			c.mu.Lock()
-			_, seen := c.seenOrders[key]
-			if !seen {
-				c.seenOrders[key] = struct{}{}
-				if len(c.seenOrders) > 512 {
-					c.seenOrders = make(map[string]struct{}, 64)
-				}
-			}
-			c.mu.Unlock()
-			if seen {
+			key := fmt.Sprintf("order:%d:%s", updates[i].Order.Oid, updates[i].Status)
+			if !c.dedup(key) {
 				continue
 			}
 			c.emit(Event{Address: c.Address, Kind: KindOrderUpdate, Order: &updates[i]})
@@ -232,6 +230,20 @@ func (c *Client) handleRaw(raw []byte) {
 			c.emit(Event{Address: c.Address, Kind: KindTwapUpdate, Twap: &wrapper.History[i]})
 		}
 	}
+}
+
+// dedup returns true if key is new (first time seen), false if duplicate.
+func (c *Client) dedup(key string) bool {
+	c.dedupMu.Lock()
+	defer c.dedupMu.Unlock()
+	if _, seen := c.seenOrders[key]; seen {
+		return false
+	}
+	c.seenOrders[key] = struct{}{}
+	if len(c.seenOrders) > 1024 {
+		c.seenOrders = make(map[string]struct{}, 64)
+	}
+	return true
 }
 
 func (c *Client) emit(e Event) {
