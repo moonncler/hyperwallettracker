@@ -22,21 +22,23 @@ const (
 )
 
 type Client struct {
-	Address string
-	Events  chan Event
-	ctx     context.Context
-	cancel  context.CancelFunc
-	mu      sync.Mutex
-	conn    *websocket.Conn
+	Address    string
+	Events     chan Event
+	ctx        context.Context
+	cancel     context.CancelFunc
+	mu         sync.Mutex
+	conn       *websocket.Conn
+	seenOrders map[string]struct{} // persistent dedup across reconnects
 }
 
 func NewClient(ctx context.Context, address string) *Client {
 	ctx, cancel := context.WithCancel(ctx)
 	return &Client{
-		Address: strings.ToLower(address),
-		Events:  make(chan Event, 512),
-		ctx:     ctx,
-		cancel:  cancel,
+		Address:    strings.ToLower(address),
+		Events:     make(chan Event, 512),
+		ctx:        ctx,
+		cancel:     cancel,
+		seenOrders: make(map[string]struct{}, 64),
 	}
 }
 
@@ -132,9 +134,6 @@ func (c *Client) connect() error {
 		}
 	}
 
-	// dedup: track last seen order OID+status to drop duplicates
-	seenOrders := make(map[string]struct{}, 64)
-
 	// decouple read from parse
 	rawCh := make(chan []byte, 256)
 	go func() {
@@ -163,12 +162,12 @@ func (c *Client) connect() error {
 				}
 				return fmt.Errorf("connection closed")
 			}
-			c.handleRaw(raw, seenOrders)
+			c.handleRaw(raw)
 		}
 	}
 }
 
-func (c *Client) handleRaw(raw []byte, seenOrders map[string]struct{}) {
+func (c *Client) handleRaw(raw []byte) {
 	var env struct {
 		Channel string          `json:"channel"`
 		Data    json.RawMessage `json:"data"`
@@ -202,15 +201,18 @@ func (c *Client) handleRaw(raw []byte, seenOrders map[string]struct{}) {
 			return
 		}
 		for i := range updates {
-			// deduplicate by oid+status
 			key := fmt.Sprintf("%d:%s", updates[i].Order.Oid, updates[i].Status)
-			if _, seen := seenOrders[key]; seen {
-				continue
+			c.mu.Lock()
+			_, seen := c.seenOrders[key]
+			if !seen {
+				c.seenOrders[key] = struct{}{}
+				if len(c.seenOrders) > 512 {
+					c.seenOrders = make(map[string]struct{}, 64)
+				}
 			}
-			seenOrders[key] = struct{}{}
-			// keep map small
-			if len(seenOrders) > 512 {
-				seenOrders = make(map[string]struct{}, 64)
+			c.mu.Unlock()
+			if seen {
+				continue
 			}
 			c.emit(Event{Address: c.Address, Kind: KindOrderUpdate, Order: &updates[i]})
 		}

@@ -49,7 +49,11 @@ func New(cfg *config.Config, database *db.DB) (*Bot, error) {
 		Timeout: 60 * time.Second,
 	}
 
-	api, err := tgbotapi.NewBotAPIWithClient(cfg.TelegramToken, tgbotapi.APIEndpoint, httpClient)
+	endpoint := tgbotapi.APIEndpoint
+	if cfg.LocalBotAPI != "" {
+		endpoint = cfg.LocalBotAPI + "/bot%s/%s"
+	}
+	api, err := tgbotapi.NewBotAPIWithClient(cfg.TelegramToken, endpoint, httpClient)
 	if err != nil {
 		return nil, err
 	}
